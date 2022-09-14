@@ -1,6 +1,10 @@
 # NewtonNet
 A Newtonian message passing network for deep learning of interatomic potentials and forces
 
+# Updates 20220913
+Download MD17 datasets from http://quantum-machine.org/gdml/#datasets, and please select the numpy format. 
+
+
 ## Installation and Dependencies
 We recommend using conda environment to install dependencies of this library first.
 Please install (or load) conda and then proceed with the following commands:
