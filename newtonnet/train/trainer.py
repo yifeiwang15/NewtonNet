@@ -174,7 +174,8 @@ class Trainer:
         print('\n total trainable parameters: %i\n' % total_n_params)
 
     def plot_grad_flow(self):
-        ave_grads = []
+        data = []
+        # ave_grads = []
         layers = []
         for n, p in self.model.named_parameters():
             if (p.requires_grad) and ("bias" not in n):
@@ -185,24 +186,35 @@ class Trainer:
                 layers.append(layer_name)
                 # print(layer_name, p.grad)
                 if p.grad is not None:
-                    ave_grads.append(p.grad.abs().mean().detach().cpu())
+                    # ave_grads.append(p.grad.abs().mean().detach().cpu())
+                    data.append(list(torch.flatten(p.grad.abs().detach().cpu())))
                 else:
-                    ave_grads.append(0)
+                    # ave_grads.append(0)
+                    data.append(0)
 
-        fig, ax = plt.subplots(1, 1)
-        ax.plot(ave_grads, alpha=0.3, color="b")
-        ax.hlines(0, 0, len(ave_grads) + 1, linewidth=1, color="k")
-        plt.xticks(range(0, len(ave_grads), 1), layers, rotation="vertical")
-        plt.xlim(xmin=0, xmax=len(ave_grads))
-        plt.xlabel("Layers")
-        plt.ylabel("average gradient")
-        plt.title("Gradient flow: epoch#%i" %self.epoch)
-        plt.grid(True)
-        ax.set_axisbelow(True)
-
-        file_name= os.path.join(self.graph_path,"avg_grad.png")
-        plt.savefig(file_name, dpi=300,bbox_inches='tight')
-        plt.close(fig)
+        # Plot the boxplot every 100 epochs
+        if self.epoch % 100 == 0:
+            fig, ax = plt.subplots(1, 1)
+            # ax.plot(ave_grads, alpha=0.3, color="b")
+            # print(len(data[0]))
+            # print(len(data[0][0]))
+            ax.boxplot(data, showfliers=False)
+            # ax.hlines(0, 0, len(ave_grads) + 1, linewidth=1, color="k")
+            # plt.xticks(range(0, len(ave_grads), 1), layers, rotation="vertical")
+            # plt.xlim(xmin=0, xmax=len(ave_grads))
+            ax.hlines(0, 0, len(data) + 1, linewidth=1, color="k")
+            plt.xticks(range(0, len(data), 1), layers, rotation="vertical")
+            plt.xlim(xmin=0, xmax=len(data))
+            plt.xlabel("Layers")
+            plt.ylabel("gradient boxplot")
+            plt.title("Gradient flow: epoch#%i" % self.epoch)
+            plt.grid(True)
+            ax.set_axisbelow(True)
+            # name = "avg_grad_box_" + str(epoch) + "_plot.png"
+            name = "grad_box_" + str(self.epoch) + "_plot.png"
+            file_name = os.path.join(self.graph_path, name)
+            plt.savefig(file_name, dpi=300, bbox_inches='tight')
+            plt.close(fig)
 
     def store_checkpoint(self, input, steps):
         self.log_loss['epoch'].append(self.epoch)
@@ -693,6 +705,7 @@ class Trainer:
                     np.save(os.path.join(self.val_out_path, 'irc_RM'), outputs['RM'])
                     # np.save(os.path.join(self.val_out_path, 'irc_Ei_epoch%i'%self.epoch), outputs['Ei'])
 
+                start = time.time()
                 # save test predictions
                 if test_generator is not None and self.epoch - last_test_epoch >= self.check_test:
                     if self.mode in ["energy/force", "energy"]:
@@ -713,6 +726,8 @@ class Trainer:
                         test_error = outputs["RMSE"]
                     last_test_epoch = self.epoch
                     # np.save(os.path.join(self.val_out_path, 'test_Ei_epoch%i'%self.epoch), outputs['Ei'])
+                end = time.time()
+                print("Epoch", self.epoch, "takes", end - start, "to complete testing")
 
             # learning rate decay
             if self.lr_scheduler[0] == 'plateau':
