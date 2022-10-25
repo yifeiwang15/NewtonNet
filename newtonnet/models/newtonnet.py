@@ -24,7 +24,7 @@ class NewtonNet(nn.Module):
 
     activation: function
         activation function from newtonnet.layers.activations
-        you can aslo get it by string from newtonnet.layers.activations.get_activation_by_string
+        you can also get it by string from newtonnet.layers.activations.get_activation_by_string
 
     n_interactions: int, default: 3
         number of interaction blocks
@@ -71,7 +71,8 @@ class NewtonNet(nn.Module):
         self.return_intermediate = return_latent
         self.pbc = pbc
 
-        shell_cutoff = None
+        #shell_cutoff = None
+        shell_cutoff = cutoff
         if pbc:
             # make the cutoff here a little bit larger so that it can be handled with differentiable cutoff layer in interaction block
             shell_cutoff = cutoff * 1.1
@@ -149,9 +150,9 @@ class NewtonNet(nn.Module):
 
     def forward(self, data):
 
-        Z = data['Z']
-        R = data['R']
-        N = data['N']
+        Z = data['Z']  # atomic_numbers
+        R = data['R']  # positions
+        N = data['N']  # neighbors
         NM = data['NM']
         AM = data['AM']
         if "lattice" in data:
@@ -160,8 +161,9 @@ class NewtonNet(nn.Module):
             lattice = None
 
         # initiate main containers
+        hs = [] # save hidden outputs
         a = self.embedding(Z)  # B,A,nf
-        f_dir = torch.zeros_like(R)  # B,A,3
+        f_dir = torch.zeros_like(R)  # directions. B,A,3.
         f_dynamics = torch.zeros(R.size() + (self.n_features,), device=R.device)  # B,A,3,nf
         r_dynamics = torch.zeros(R.size() + (self.n_features,), device=R.device)  # B,A,3,nf
         e_dynamics = torch.zeros_like(a)  # B,A,nf
@@ -181,7 +183,7 @@ class NewtonNet(nn.Module):
         else:
             distances, distance_vector, N, NM = self.shell(R, N, NM, lattice)
 
-        # comput d1 representation (B, A, N, G)
+        # compute d1 representation (B, A, N, G)
         rbf = self.distance_expansion(distances)
 
         # compute interaction block and update atomic embeddings
@@ -189,7 +191,7 @@ class NewtonNet(nn.Module):
             # print('iter: ', i_interax)
 
             # messages
-            a, f_dir, f_dynamics, r_dynamics, e_dynamics = self.dycalc[i_interax](a, rbf, distances, distance_vector, N,
+            a, f_dir, distance_vector, f_dynamics, r_dynamics, e_dynamics = self.dycalc[i_interax](a, rbf, distances, distance_vector, N,
                                                                                   NM,
                                                                                   f_dir, f_dynamics, r_dynamics,
                                                                                   e_dynamics
@@ -250,7 +252,7 @@ class NewtonNet(nn.Module):
 
 class DynamicsCalculator(nn.Module):
 
-    def __init__(
+    def  __init__(
             self,
             n_features,
             resolution,
@@ -258,12 +260,14 @@ class DynamicsCalculator(nn.Module):
             cutoff,
             cutoff_network,
             double_update_latent=True,
-            epsilon=1e-8
+            epsilon=1e-8,
+            beta=0.9
     ):
         super(DynamicsCalculator, self).__init__()
 
         self.n_features = n_features
         self.epsilon = epsilon
+        self.beta = beta
 
         # non-directional message passing
         self.phi_rbf = Dense(resolution, n_features, activation=None)
@@ -351,8 +355,24 @@ class DynamicsCalculator(nn.Module):
 
         return out
 
+    def vector_norm(self, x):
+        """
+        vector normalization according to its last dimension.
+        x: torch.tensor
+            usually of shape B,A,N,3 or B,A,3
+            the last dimension must be 3.
+
+        Returns:
+
+        """
+        if x.shape[-1] != 3:
+            print("Warning: the last dim of your input tensor is not 3. The input may not be a relative direction.")
+        norm = torch.linalg.norm(x, dim=-1) + self.epsilon
+        x = torch.div(x, norm.unsqueeze(-1))
+        return x
+
     def forward(self, a, rbf, distances, distance_vector, N, NM,
-                f_dir, f_dynamics, r_dynamics, e_dynamics
+                f_dir, f_dynamics, r_dynamics, e_dynamics, accumulative_latent_force=False
                 ):
 
         # map decomposed distances
@@ -363,7 +383,7 @@ class DynamicsCalculator(nn.Module):
         rbf_msij = rbf_msij * C.unsqueeze(-1)
 
         # map atomic features
-        a_msij = self.phi_a(a)  # B,A,3*nf
+        a_msij = self.phi_a(a)  # B,A,nf
 
         # copy central atom features for the element-wise multiplication
         ai_msij = a_msij.repeat(1, 1, rbf_msij.size(2))
@@ -384,11 +404,22 @@ class DynamicsCalculator(nn.Module):
         # print('msij:', msij.shape, msij[0,0])
         F_ij = self.phi_f(msij) * distance_vector  # B,A,N,3
         F_i_dir = self.sum_neighbors(F_ij, NM, dim=2)  # B,A,3
-        f_dir = f_dir + F_i_dir
+        if accumulative_latent_force:
+            f_dir = f_dir + F_i_dir
+        else:
+            f_dir = F_i_dir
 
         F_ij = self.phi_f_scale(msij).unsqueeze(-2) * F_ij.unsqueeze(-1)  # B,A,N,3,nf
         # print('F_ij:', F_ij.shape, F_ij[0,0])
         F_i = self.sum_neighbors(F_ij, NM, dim=2)  # B,A,3,nf
+
+        ## TODO Update: add momentum to relative distance vectors
+        # normalize f_dir
+        f_dir = self.vector_norm(f_dir)
+        distance_vector = self.beta * distance_vector + (1 - self.beta)*self.vector_norm(f_dir).unsqueeze(-2)
+        distance_vector = self.vector_norm(distance_vector)
+
+        ## Finished
 
         # dr
         dr_i = self.phi_r(a).unsqueeze(-2) * F_i  # B,A,3,nf
@@ -408,7 +439,7 @@ class DynamicsCalculator(nn.Module):
         a = a + de_i
         e_dynamics = e_dynamics + de_i
 
-        return a, f_dir, f_dynamics, r_dynamics, e_dynamics
+        return a, f_dir, distance_vector, f_dynamics, r_dynamics, e_dynamics
 
 
 class AtomicEnergy(nn.Module):
