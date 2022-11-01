@@ -7,7 +7,7 @@ from newtonnet.layers.shells import ShellProvider
 from newtonnet.layers.scalers import ScaleShift, TrainableScaleShift
 from newtonnet.layers.cutoff import CosineCutoff, PolynomialCutoff
 from newtonnet.layers.representations import RadialBesselLayer
-
+from newtonnet.layers.gvp import GVP
 
 class NewtonNet(nn.Module):
     """
@@ -303,6 +303,9 @@ class DynamicsCalculator(nn.Module):
             Dense(n_features, n_features, activation=None)
         )
 
+        # gvp module
+        self.gvp = GVP([n_features, n_features], [n_features, n_features], vector_gate=True)
+
         self.double_update_latent = double_update_latent
 
     def gather_neighbors(self, inputs, N):
@@ -422,7 +425,8 @@ class DynamicsCalculator(nn.Module):
         ## Finished
 
         # dr
-        dr_i = self.phi_r(a).unsqueeze(-2) * F_i  # B,A,3,nf
+        _a, dr_i = self.gvp([a, F_i])
+        #dr_i = self.phi_r(a).unsqueeze(-2) * F_i  # B,A,3,nf
 
         dr_j = self.gather_neighbors(r_dynamics, N)  # B,A,N,3,nf
         dr_j = self.phi_r_ext(msij).unsqueeze(-2) * dr_j  # B,A,N,3,nf
@@ -436,7 +440,7 @@ class DynamicsCalculator(nn.Module):
         # update energy
         de_i = -1.0 * torch.sum(f_dynamics * r_dynamics, dim=-2)  # B,A,nf
         de_i = self.phi_e(a) * de_i
-        a = a + de_i
+        a = _a + de_i
         e_dynamics = e_dynamics + de_i
 
         return a, f_dir, distance_vector, f_dynamics, r_dynamics, e_dynamics
